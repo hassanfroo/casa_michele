@@ -23,12 +23,14 @@ export interface Order {
   cocktailName: string;
   status: OrderStatus;
   timestamp: number;
+  guestPhone?: string;
 }
 
 export interface EventSession {
   eventCode: string;
   isBartender: boolean;
   guestName?: string;
+  guestPhone?: string;
 }
 
 export interface AppState {

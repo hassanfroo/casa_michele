@@ -24,9 +24,13 @@ import {
   EyeOff,
   Lock,
   Tag,
-  QrCode
+  QrCode,
+  MessageCircle,
+  Phone
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
+import { PhoneInput } from 'react-international-phone';
+import 'react-international-phone/style.css';
 import { Cocktail, Order, OrderStatus, IngredientAvailability, EventSession } from './types';
 import { MockDB } from './services/db';
 import { fetchCocktailsFromSheet } from './services/sheet';
@@ -104,6 +108,7 @@ const App: React.FC = () => {
   // QR Code & Auto-Join State
   const [pendingSessionCode, setPendingSessionCode] = useState<string | null>(null);
   const [showQrCode, setShowQrCode] = useState(false);
+  const [guestPhoneInput, setGuestPhoneInput] = useState('');
 
   useEffect(() => {
     const saved = MockDB.getCocktails();
@@ -180,9 +185,9 @@ const App: React.FC = () => {
     setToastMessage(msg);
   };
 
-  const handleJoin = (role: 'bartender' | 'guest', code: string, guestName?: string) => {
+  const handleJoin = (role: 'bartender' | 'guest', code: string, guestName?: string, guestPhone?: string) => {
     if (!code) return;
-    setSession({ eventCode: code.toUpperCase(), isBartender: role === 'bartender', guestName });
+    setSession({ eventCode: code.toUpperCase(), isBartender: role === 'bartender', guestName, guestPhone });
     setView(role);
     setOrders(MockDB.getOrders(code.toUpperCase()));
     setAvailability(MockDB.getAvailability(code.toUpperCase()));
@@ -257,6 +262,7 @@ const App: React.FC = () => {
       id: Math.random().toString(36).substr(2, 9),
       eventCode: session.eventCode,
       guestName: session.guestName || 'Guest',
+      guestPhone: session.guestPhone,
       cocktailId: selectedCocktail.id,
       cocktailName: selectedCocktail.name,
       status: 'pending',
@@ -820,6 +826,18 @@ const App: React.FC = () => {
                         >
                           NOTIFY READY
                         </button>
+                        {o.guestPhone && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const text = `Hey ${o.guestName}! Your ${o.cocktailName} is ready at the bar! 🍸`;
+                              window.open(`https://wa.me/${o.guestPhone}?text=${encodeURIComponent(text)}`, '_blank');
+                            }}
+                            className="w-14 h-14 bg-green-500 text-white rounded-2xl flex items-center justify-center border border-green-600 active:scale-90 transition-all shadow-lg shadow-green-500/20"
+                          >
+                            <MessageCircle size={24} fill="currentColor" />
+                          </button>
+                        )}
                         <button
                           onClick={(e) => { e.stopPropagation(); updateOrder(o.id, 'deleted'); }}
                           className="w-14 h-14 bg-zinc-800/50 text-red-500/80 rounded-2xl flex items-center justify-center border border-zinc-700/50 active:scale-90 transition-all"
@@ -1074,10 +1092,36 @@ const App: React.FC = () => {
             <form onSubmit={(e) => {
               e.preventDefault();
               const fd = new FormData(e.currentTarget);
-              handleJoin('guest', (pendingSessionCode || fd.get('code') as string), fd.get('name') as string);
+              handleJoin('guest', (pendingSessionCode || fd.get('code') as string), fd.get('name') as string, guestPhoneInput);
             }} className="space-y-6">
               <div className="space-y-4">
                 <input name="name" placeholder="Full Name" required autoFocus className="w-full h-18 px-6 bg-zinc-900 text-white rounded-2xl border-none ring-1 ring-zinc-800 focus:ring-2 focus:ring-amber-500 text-xl" />
+
+                <div className="w-full">
+                  <PhoneInput
+                    defaultCountry="us"
+                    value={guestPhoneInput}
+                    onChange={(phone) => setGuestPhoneInput(phone)}
+                    inputClassName="!w-full !h-18 !bg-zinc-900 !text-white !text-xl !border-none !ring-0 focus:!ring-0 placeholder:!text-zinc-600 !pl-3"
+                    className="rounded-2xl ring-1 ring-zinc-800 focus-within:ring-2 focus-within:ring-amber-500 bg-zinc-900 relative"
+                    countrySelectorStyleProps={{
+                      buttonClassName: '!bg-zinc-900 !border-none !h-18 !rounded-l-2xl !pl-4',
+                      dropdownStyleProps: {
+                        className: '!bg-zinc-900 !text-white !border-zinc-800 !rounded-xl !shadow-xl !z-50',
+                        listItemClassName: 'hover:!bg-zinc-800 !text-white'
+                      }
+                    }}
+                    style={{
+                      '--react-international-phone-background-color': '#18181b',
+                      '--react-international-phone-text-color': '#fff',
+                      '--react-international-phone-border-color': 'transparent',
+                      '--react-international-phone-height': '72px',
+                      '--react-international-phone-font-size': '1.25rem',
+                      '--react-international-phone-border-radius': '0',
+                    } as React.CSSProperties}
+                  />
+                </div>
+
                 {!pendingSessionCode && (
                   <input name="code" placeholder="Event Code" required className="w-full h-18 px-6 bg-zinc-900 text-white rounded-2xl border-none ring-1 ring-zinc-800 focus:ring-2 focus:ring-amber-500 text-xl font-bold tracking-widest uppercase" />
                 )}
