@@ -60,6 +60,18 @@ const SPIRITS_LIST = [
 
 const BARTENDER_PASSWORD = 'shake';
 
+// Helper: Map Supabase Order row to App Order type
+const mapOrderFromDB = (row: any): Order => ({
+  id: row.id,
+  eventCode: row.event_code,
+  guestName: row.guest_name,
+  guestPhone: row.guest_phone,
+  cocktailId: row.cocktail_id,
+  cocktailName: row.cocktail_name,
+  status: row.status as OrderStatus,
+  timestamp: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
+});
+
 const categorizeIngredient = (name: string): string => {
   const n = name.toLowerCase();
   if (n.includes('bitter')) return 'Bitter';
@@ -137,7 +149,7 @@ const App: React.FC = () => {
         .eq('event_code', code)
         .neq('status', 'deleted');
 
-      if (ordersData) setOrders(ordersData as Order[]);
+      if (ordersData) setOrders(ordersData.map(mapOrderFromDB));
 
       // Fetch Availability
       const { data: availData } = await supabase
@@ -163,7 +175,8 @@ const App: React.FC = () => {
         'postgres_changes',
         { event: '*', schema: 'public', table: 'orders', filter: `event_code=eq.${code}` },
         (payload) => {
-          const newOrder = payload.new as Order;
+          const newOrderRaw = payload.new as any;
+          const newOrder = mapOrderFromDB(newOrderRaw);
 
           if (payload.eventType === 'INSERT') {
             setOrders(prev => [...prev, newOrder]);
