@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   Users,
@@ -32,9 +31,11 @@ import { QRCodeSVG } from 'qrcode.react';
 import { PhoneInput } from 'react-international-phone';
 import 'react-international-phone/style.css';
 import { Cocktail, Order, OrderStatus, IngredientAvailability, EventSession } from './types';
-import { MockDB } from './services/db';
+import { supabase } from './services/supabase';
 import { fetchCocktailsFromSheet } from './services/sheet';
 import { Button, BottomSheet, Toast, Badge } from './components/UI';
+
+const VERSION = "v1.1.0 (Supabase)";
 
 const INGREDIENT_CATEGORIES = [
   'Spirit',
@@ -110,24 +111,95 @@ const App: React.FC = () => {
   const [showQrCode, setShowQrCode] = useState(false);
   const [guestPhoneInput, setGuestPhoneInput] = useState('');
 
+  // Initial Data Load
   useEffect(() => {
-    const saved = MockDB.getCocktails();
-    if (saved && saved.length > 0) {
-      setCocktails(saved);
+    // Load cocktails from local storage first for speed, then refresh
+    const saved = localStorage.getItem('ceb_cocktails_v5');
+    if (saved) {
+      try { setCocktails(JSON.parse(saved)); } catch (e) { }
     } else {
       refreshData();
     }
   }, []);
 
+  // Realtime Subscriptions & Initial Fetch for Session
   useEffect(() => {
-    if (session?.eventCode) {
-      const poll = setInterval(() => {
-        setOrders(MockDB.getOrders(session.eventCode));
-        setAvailability(MockDB.getAvailability(session.eventCode));
-      }, 3000);
-      return () => clearInterval(poll);
-      return () => clearInterval(poll);
-    }
+    if (!session?.eventCode) return;
+
+    const code = session.eventCode;
+
+    // 1. Initial Fetch
+    const fetchData = async () => {
+      // Fetch Orders
+      const { data: ordersData } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('event_code', code)
+        .neq('status', 'deleted');
+
+      if (ordersData) setOrders(ordersData as Order[]);
+
+      // Fetch Availability
+      const { data: availData } = await supabase
+        .from('availability')
+        .select('ingredient_name, is_available')
+        .eq('event_code', code);
+
+      const newAvail: IngredientAvailability = {};
+      availData?.forEach((row: any) => {
+        // In App logic: availability[ing] = true means OUT.
+        // DB State: is_available = false means OUT.
+        if (row.is_available === false) {
+          newAvail[row.ingredient_name] = true; // Set to OUT
+        }
+      });
+      setAvailability(newAvail);
+    };
+    fetchData();
+
+    // 2. Realtime Subscriptions
+    const channel = supabase.channel(`room_${code}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'orders', filter: `event_code=eq.${code}` },
+        (payload) => {
+          const newOrder = payload.new as Order;
+
+          if (payload.eventType === 'INSERT') {
+            setOrders(prev => [...prev, newOrder]);
+            showToast('New Order!');
+          } else if (payload.eventType === 'UPDATE') {
+            setOrders(prev => prev.map(o => o.id === newOrder.id ? newOrder : o));
+            if (newOrder.status === 'completed' && session.isBartender) {
+              // Bartender notification logic if needed
+            }
+          }
+          if (payload.eventType === 'UPDATE' && newOrder.status === 'deleted') {
+            setOrders(prev => prev.filter(o => o.id !== newOrder.id));
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'availability', filter: `event_code=eq.${code}` },
+        (payload) => {
+          const row = payload.new as any;
+          setAvailability(prev => {
+            const next = { ...prev };
+            if (row.is_available === false) {
+              next[row.ingredient_name] = true; // OUT
+            } else {
+              delete next[row.ingredient_name]; // IN STOCK
+            }
+            return next;
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [session?.eventCode]);
 
   useEffect(() => {
@@ -142,7 +214,6 @@ const App: React.FC = () => {
   // Guest Notification Logic
   useEffect(() => {
     if (view === 'guest' && session && orders.length > 0) {
-      // 1. Initialize logic: Don't notify for historical completed orders on first load/refresh
       if (!hasInitializedOrders) {
         const historyCompleted = orders.filter(o => o.status === 'completed' && o.guestName === session.guestName);
         setNotifiedOrders(new Set(historyCompleted.map(o => o.id)));
@@ -150,14 +221,12 @@ const App: React.FC = () => {
         return;
       }
 
-      // 2. Check for NEW completed orders
       const myCompletedOrders = orders.filter(o => o.status === 'completed' && o.guestName === session.guestName);
       const newReady = myCompletedOrders.find(o => !notifiedOrders.has(o.id));
 
       if (newReady) {
         setPickupNotification(newReady);
         setNotifiedOrders(prev => new Set(prev).add(newReady.id));
-        // Simple vibration if supported
         if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
       }
     }
@@ -169,7 +238,7 @@ const App: React.FC = () => {
       const data = await fetchCocktailsFromSheet();
       if (data.length > 0) {
         setCocktails(data);
-        MockDB.saveCocktails(data);
+        localStorage.setItem('ceb_cocktails_v5', JSON.stringify(data));
         showToast('Menu Updated from Sheet');
       } else {
         showToast('No cocktails found in Sheet');
@@ -189,23 +258,44 @@ const App: React.FC = () => {
     if (!code) return;
     setSession({ eventCode: code.toUpperCase(), isBartender: role === 'bartender', guestName, guestPhone });
     setView(role);
-    setOrders(MockDB.getOrders(code.toUpperCase()));
-    setAvailability(MockDB.getAvailability(code.toUpperCase()));
-    // Reset notification state on new join
     setNotifiedOrders(new Set());
     setHasInitializedOrders(false);
   };
 
-  const toggleAvailability = (ingredient: string) => {
+  const toggleAvailability = async (ingredient: string) => {
     if (!session) return;
-    const newAvail = { ...availability, [ingredient]: !availability[ingredient] };
+    const isCurrentlyOut = availability[ingredient]; // true if OUT
+
+    const newIsAvailableInDB = !!isCurrentlyOut; // If out(true), new DB is true(in). If in(false), new DB is false(out).
+
+    // Optimistic Update
+    const newAvail = { ...availability };
+    if (isCurrentlyOut) delete newAvail[ingredient];
+    else newAvail[ingredient] = true;
     setAvailability(newAvail);
-    MockDB.setAvailability(session.eventCode, newAvail);
+
+    // DB Update
+    const { error } = await supabase.from('availability').upsert({
+      event_code: session.eventCode,
+      ingredient_name: ingredient,
+      is_available: newIsAvailableInDB
+    }, { onConflict: 'event_code, ingredient_name' });
+
+    if (error) {
+      // Revert optimistic update if failed
+      if (isCurrentlyOut) newAvail[ingredient] = true;
+      else delete newAvail[ingredient];
+      setAvailability(newAvail);
+      showToast('Failed to update availability');
+    }
   };
 
-  const updateOrder = (orderId: string, status: OrderStatus) => {
-    MockDB.updateOrderStatus(orderId, status);
-    setOrders(MockDB.getOrders(session?.eventCode || ''));
+  const updateOrder = async (orderId: string, status: OrderStatus) => {
+    // Optimistic
+    setOrders(prev => prev.map(o => o.id === orderId ? { ...o, status } : o));
+
+    await supabase.from('orders').update({ status }).eq('id', orderId);
+
     if (status === 'completed') showToast('Guest Notified');
   };
 
@@ -246,7 +336,6 @@ const App: React.FC = () => {
   const placeOrder = () => {
     if (!session || !selectedCocktail) return;
 
-    // Safety check for availability at moment of order
     if (selectedCocktail.ingredients.some(i => availability[i])) {
       showToast('Sorry, ingredients just ran out!');
       setIsConfirmingOrder(false);
@@ -254,25 +343,29 @@ const App: React.FC = () => {
     }
 
     const now = Date.now();
-    if (now - lastOrderTime < 30000) {
-      showToast('Safety lock: Wait 30s');
+    if (now - lastOrderTime < 5000) {
+      showToast('Safety lock: Wait 5s');
       return;
     }
-    const newOrder: Order = {
-      id: Math.random().toString(36).substr(2, 9),
-      eventCode: session.eventCode,
-      guestName: session.guestName || 'Guest',
-      guestPhone: session.guestPhone,
-      cocktailId: selectedCocktail.id,
-      cocktailName: selectedCocktail.name,
+
+    const newOrderPayload = {
+      event_code: session.eventCode,
+      guest_name: session.guestName || 'Guest',
+      guest_phone: session.guestPhone,
+      cocktail_id: selectedCocktail.id,
+      cocktail_name: selectedCocktail.name,
       status: 'pending',
-      timestamp: now,
+      created_at: new Date().toISOString()
     };
-    MockDB.createOrder(newOrder);
+
+    supabase.from('orders').insert(newOrderPayload).then(({ error }) => {
+      if (error) showToast('Failed to order');
+      else showToast('Sent to bar!');
+    });
+
     setLastOrderTime(now);
     setIsConfirmingOrder(false);
     setSelectedCocktail(null);
-    showToast('Sent to bar!');
   };
 
   const allIngredients = useMemo(() => {
@@ -297,11 +390,9 @@ const App: React.FC = () => {
 
   const filteredRecipes = useMemo(() => {
     return cocktails.filter(c => {
-      // 1. Search
       const matchesSearch = c.name.toLowerCase().includes(searchQuery.toLowerCase());
       if (!matchesSearch) return false;
 
-      // 2. Spirit Filter
       const cocktailSpirits = c.ingredients.filter(ing => categorizeIngredient(ing) === 'Spirit');
       let spiritMatch = false;
       if (cocktailSpirits.length === 0) {
@@ -314,7 +405,6 @@ const App: React.FC = () => {
       }
       if (!spiritMatch) return false;
 
-      // 3. Taste Profile Filter
       if (activeTasteProfiles.length > 0) {
         const profiles = c.tasteProfiles || [];
         const tasteMatch = profiles.some(p => activeTasteProfiles.includes(p));
@@ -327,15 +417,12 @@ const App: React.FC = () => {
 
   const filteredGuestCocktails = useMemo(() => {
     return cocktails.filter(c => {
-      // 1. Availability Check
       const isUnavailable = c.ingredients.some(i => availability[i]);
       if (!guestShowUnavailable && isUnavailable) return false;
 
-      // 2. Search
       const matchesSearch = c.name.toLowerCase().includes(searchQuery.toLowerCase());
       if (!matchesSearch) return false;
 
-      // 3. Spirits
       const cocktailSpirits = c.ingredients.filter(ing => categorizeIngredient(ing) === 'Spirit');
       let spiritMatch = false;
       if (cocktailSpirits.length === 0) {
@@ -348,7 +435,6 @@ const App: React.FC = () => {
       }
       if (!spiritMatch) return false;
 
-      // 4. Taste Profiles (Optional Filter)
       if (activeTasteProfiles.length > 0) {
         const profiles = c.tasteProfiles || [];
         const tasteMatch = profiles.some(p => activeTasteProfiles.includes(p));
@@ -361,7 +447,7 @@ const App: React.FC = () => {
 
   if (view === 'landing') {
     return (
-      <div className="min-h-screen bg-zinc-950 flex flex-col p-8 items-center justify-center space-y-12">
+      <div className="min-h-screen bg-zinc-950 flex flex-col p-8 items-center justify-center space-y-12 relative">
         <div className="text-center space-y-6">
           <div className="w-28 h-28 bg-gradient-to-br from-amber-400 to-amber-600 text-zinc-950 rounded-[36px] flex items-center justify-center mx-auto shadow-[0_0_50px_rgba(251,191,36,0.2)]">
             <Wine size={56} strokeWidth={2.5} />
@@ -379,12 +465,15 @@ const App: React.FC = () => {
             <UserCircle className="mr-2" /> Bartender Access
           </Button>
         </div>
+        <div className="absolute bottom-4 right-4 text-zinc-700 text-xs font-mono opacity-50">
+          {VERSION}
+        </div>
       </div>
     );
   }
 
   if (view === 'guest' && session) {
-    const lastOrder = [...orders].filter(o => o.guestName === session.guestName).sort((a, b) => b.timestamp - a.timestamp)[0];
+    const lastOrder = [...orders].filter(o => o.guestName === session.guestName).sort((a, b) => new Date(b.created_at!).getTime() - new Date(a.created_at!).getTime())[0];
     const isUnavailable = selectedCocktail?.ingredients.some(i => availability[i]);
 
     return (
@@ -439,7 +528,6 @@ const App: React.FC = () => {
             </div>
 
             <div className="space-y-2 pb-2">
-              {/* Row 1: Spirits & Settings */}
               <div className="flex overflow-x-auto gap-1.5 px-4 py-4 items-center">
                 <button
                   onClick={() => setGuestShowUnavailable(!guestShowUnavailable)}
@@ -460,7 +548,6 @@ const App: React.FC = () => {
                 ))}
               </div>
 
-              {/* Row 2: Taste Profiles (Only if available) */}
               {allTasteProfiles.length > 0 && (
                 <div className="flex overflow-x-auto gap-1.5 px-4 py-4 items-center fade-in duration-500 -mt-2">
                   <div className="flex items-center justify-center w-6 shrink-0 text-zinc-600">
@@ -526,7 +613,6 @@ const App: React.FC = () => {
                         <p className="text-zinc-500 text-[8px] font-black uppercase truncate tracking-tighter">
                           {c.ingredients.filter(i => categorizeIngredient(i) === 'Spirit').join(', ') || 'House Mix'}
                         </p>
-                        {/* Taste Profiles - Below Spirit */}
                         {c.tasteProfiles && c.tasteProfiles.length > 0 && (
                           <div className="flex flex-wrap gap-1 mt-0.5">
                             {c.tasteProfiles.slice(0, 3).map(p => (
@@ -585,7 +671,6 @@ const App: React.FC = () => {
 
           <Toast isVisible={!!toastMessage} message={toastMessage} onHide={() => setToastMessage('')} />
 
-          {/* Pickup Notification Overlay */}
           {pickupNotification && (
             <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-300">
               <div className="bg-zinc-900 border border-zinc-800 p-8 rounded-[32px] w-full max-w-sm text-center space-y-6 shadow-2xl relative overflow-hidden animate-in zoom-in-95 duration-300">
@@ -633,7 +718,6 @@ const App: React.FC = () => {
                 <div className="fallback-icon hidden text-zinc-700">
                   <ImageIcon size={48} />
                 </div>
-                {/* Taste Profiles in Bottom Sheet - Keep strict ones */}
                 {selectedCocktail?.tasteProfiles && selectedCocktail.tasteProfiles.length > 0 && (
                   <div className="absolute top-4 left-4 flex gap-1.5 flex-wrap">
                     {selectedCocktail.tasteProfiles.map(p => (
@@ -690,7 +774,6 @@ const App: React.FC = () => {
     );
   }
 
-  // ... (Bartender and Login views remain the same but included in the full file return)
   if (view === 'bartender' && session) {
     return (
       <div className="min-h-screen bg-zinc-950 flex flex-col items-center">
@@ -714,7 +797,6 @@ const App: React.FC = () => {
             </div>
           </header>
 
-          {/* QR Code Modal */}
           {showQrCode && (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/90 backdrop-blur-sm animate-in fade-in duration-200" onClick={() => setShowQrCode(false)}>
               <div className="bg-white p-8 rounded-[32px] w-full max-w-sm flex flex-col items-center space-y-6 animate-in zoom-in-95 duration-200" onClick={e => e.stopPropagation()}>
@@ -798,226 +880,134 @@ const App: React.FC = () => {
             {activeTab === 'orders' && (
               <div className="p-4 space-y-4 max-w-4xl mx-auto w-full">
                 <div className="flex justify-between items-center px-1">
-                  <h2 className="text-[10px] font-black text-zinc-600 uppercase tracking-widest">Incoming Queue</h2>
-                  <Badge variant="neutral">{orders.filter(o => o.status === 'pending').length}</Badge>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {orders.filter(o => o.status === 'pending').sort((a, b) => b.timestamp - a.timestamp).map(o => (
-                    <div
-                      key={o.id}
-                      onClick={() => openRecipeForOrder(o)}
-                      className="bg-zinc-900/50 p-5 rounded-[2rem] border border-zinc-800/50 flex flex-col gap-5 shadow-sm active:scale-[0.98] transition-all cursor-pointer hover:bg-zinc-900"
+                  <h2 className="text-xl font-black text-white italic">Order Queue</h2>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setBartenderViewMode(bartenderViewMode === 'grid' ? 'list' : 'grid')}
+                      className="h-9 w-9 flex items-center justify-center bg-zinc-800 rounded-lg text-zinc-400"
                     >
-                      <div className="flex justify-between items-start pointer-events-none">
-                        <div className="space-y-0.5">
-                          <h3 className="text-lg font-black text-white leading-tight uppercase tracking-tight">{o.guestName}</h3>
-                          <p className="text-amber-500 font-bold italic text-base leading-tight">{o.cocktailName}</p>
-                        </div>
-                        <div className="flex items-center gap-1.5 text-zinc-600">
-                          <Clock size={12} strokeWidth={3} />
-                          <span className="text-[10px] font-mono font-bold">{new Date(o.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={(e) => { e.stopPropagation(); updateOrder(o.id, 'completed'); }}
-                          className="flex-1 bg-white text-zinc-950 h-14 rounded-2xl font-black text-sm tracking-[0.1em] uppercase shadow-lg active:scale-95 transition-all"
-                        >
-                          NOTIFY READY
-                        </button>
-                        {o.guestPhone && (
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              const text = `Hey ${o.guestName}! Your ${o.cocktailName} is ready at the bar! 🍸`;
-                              window.open(`https://wa.me/${o.guestPhone}?text=${encodeURIComponent(text)}`, '_blank');
-                            }}
-                            className="w-14 h-14 bg-green-500 text-white rounded-2xl flex items-center justify-center border border-green-600 active:scale-90 transition-all shadow-lg shadow-green-500/20"
-                          >
-                            <MessageCircle size={24} fill="currentColor" />
-                          </button>
-                        )}
-                        <button
-                          onClick={(e) => { e.stopPropagation(); updateOrder(o.id, 'deleted'); }}
-                          className="w-14 h-14 bg-zinc-800/50 text-red-500/80 rounded-2xl flex items-center justify-center border border-zinc-700/50 active:scale-90 transition-all"
-                        >
-                          <Trash2 size={20} />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-
-                  {orders.filter(o => o.status === 'pending').length === 0 && (
-                    <div className="col-span-full py-24 text-center space-y-4">
-                      <div className="w-16 h-16 bg-zinc-900 rounded-3xl flex items-center justify-center mx-auto text-zinc-800">
-                        <Wine size={32} />
-                      </div>
-                      <p className="text-zinc-700 font-black uppercase text-[10px] tracking-[0.2em]">No pending orders</p>
-                    </div>
-                  )}
+                      {bartenderViewMode === 'grid' ? <ListIcon size={16} /> : <LayoutGrid size={16} />}
+                    </button>
+                  </div>
                 </div>
 
-                {orders.filter(o => o.status === 'completed').length > 0 && (
-                  <div className="pt-8 space-y-3">
-                    <h2 className="text-[10px] font-black text-zinc-800 uppercase tracking-widest px-1">Recent Activity</h2>
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-1.5 opacity-30">
-                      {orders.filter(o => o.status === 'completed').sort((a, b) => b.timestamp - a.timestamp).slice(0, 6).map(o => (
-                        <div key={o.id} className="bg-zinc-900/50 px-4 py-3 rounded-xl flex justify-between items-center border border-zinc-800">
-                          <div className="flex flex-col">
-                            <span className="text-white font-bold text-xs">{o.guestName}</span>
-                            <span className="text-[10px] text-zinc-500">{o.cocktailName}</span>
+                {orders.length === 0 ? (
+                  <div className="py-20 text-center space-y-4">
+                    <div className="w-16 h-16 bg-zinc-900 rounded-full flex items-center justify-center mx-auto text-zinc-700"><ClipboardList size={32} /></div>
+                    <p className="text-zinc-500 font-medium">No orders yet</p>
+                  </div>
+                ) : (
+                  <div className={`grid ${bartenderViewMode === 'grid' ? 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3' : 'grid-cols-1'} gap-3`}>
+                    {orders
+                      .sort((a, b) => {
+                        if (a.status === 'pending' && b.status !== 'pending') return -1;
+                        if (a.status !== 'pending' && b.status === 'pending') return 1;
+                        // Oldest first for pending, newest first for others? Or just time?
+                        // Consistent: Time descending (newest top)
+                        const tA = new Date(a.created_at || 0).getTime();
+                        const tB = new Date(b.created_at || 0).getTime();
+                        return tB - tA;
+                      })
+                      .map(o => (
+                        <div key={o.id} className={`bg-zinc-900 p-5 rounded-2xl border ${o.status === 'pending' ? 'border-amber-500/30' : 'border-zinc-800'} relative overflow-hidden group`}>
+                          {o.status === 'pending' && <div className="absolute top-0 right-0 w-20 h-20 bg-amber-500/10 rounded-bl-[100px] -mr-8 -mt-8 pointer-events-none" />}
+
+                          <div className="flex justify-between items-start mb-4">
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2">
+                                <h3 className="font-black text-white text-lg">{o.cocktailName}</h3>
+                                {o.status === 'pending' && <span className="w-2 h-2 bg-amber-500 rounded-full animate-pulse"></span>}
+                              </div>
+                              <div className="flex items-center gap-2 text-zinc-500 text-xs font-bold uppercase tracking-wider">
+                                <UserCircle size={12} />
+                                <span>{o.guestName}</span>
+                                {o.timestamp && <span>• {new Date(o.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>}
+                              </div>
+                            </div>
+                            <Badge variant={o.status === 'completed' ? 'success' : o.status === 'pending' ? 'warning' : 'neutral'}>
+                              {o.status}
+                            </Badge>
                           </div>
-                          <Check size={14} className="text-green-500" />
+
+                          <div className="flex flex-col gap-3">
+                            {o.status === 'pending' ? (
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => updateOrder(o.id, 'completed')}
+                                  className="flex-1 h-14 bg-green-500 text-white rounded-2xl font-black uppercase tracking-wider hover:bg-green-400 active:scale-95 transition-all flex items-center justify-center gap-2"
+                                >
+                                  <Check size={20} /> Done
+                                </button>
+                                <button
+                                  onClick={() => openRecipeForOrder(o)}
+                                  className="w-14 h-14 bg-zinc-800 text-zinc-400 rounded-2xl flex items-center justify-center hover:bg-zinc-700 hover:text-white transition-all"
+                                >
+                                  <BookOpen size={20} />
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex gap-2">
+                                {o.guestPhone && o.status === 'completed' && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      const text = `Hey ${o.guestName}! Your ${o.cocktailName} is ready at the bar! 🍸`;
+                                      window.open(`https://wa.me/${o.guestPhone}?text=${encodeURIComponent(text)}`, '_blank');
+                                    }}
+                                    className="w-14 h-14 bg-green-500 text-white rounded-2xl flex items-center justify-center border border-green-600 active:scale-90 transition-all shadow-lg shadow-green-500/20"
+                                  >
+                                    <MessageCircle size={24} fill="currentColor" />
+                                  </button>
+                                )}
+
+                                {o.status === 'completed' && (
+                                  <button
+                                    onClick={() => updateOrder(o.id, 'pending')}
+                                    className="flex-1 h-14 bg-zinc-800 text-zinc-400 rounded-2xl font-bold uppercase tracking-wider text-xs hover:bg-zinc-700 hover:text-white transition-all"
+                                  >
+                                    Undo
+                                  </button>
+                                )}
+
+                                <button
+                                  onClick={() => {
+                                    // Soft delete or hide
+                                    updateOrder(o.id, 'deleted'); // We implemented 'deleted' status filter
+                                  }}
+                                  className="w-14 h-14 bg-zinc-900 border border-zinc-800 text-zinc-600 rounded-2xl flex items-center justify-center hover:text-red-500 hover:border-red-500/30 transition-all"
+                                >
+                                  <Trash2 size={20} />
+                                </button>
+                              </div>
+                            )}
+                          </div>
                         </div>
                       ))}
-                    </div>
                   </div>
                 )}
               </div>
             )}
 
             {activeTab === 'instructions' && (
-              <div className="space-y-0">
-                <div className="sticky top-0 z-30 bg-zinc-950/80 backdrop-blur-xl p-4 space-y-4">
-                  <div className="relative">
-                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-zinc-500" size={16} />
-                    <input
-                      type="text"
-                      placeholder="Search instructions..."
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      className="w-full h-11 pl-11 pr-4 bg-zinc-900 rounded-xl border-none ring-1 ring-zinc-800 focus:ring-2 focus:ring-amber-500/50 outline-none transition-all text-sm text-white"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <div className="flex gap-2">
-                      <div className="flex-1 flex overflow-x-auto gap-1.5 pb-2">
-                        {SPIRITS_LIST.map(spirit => (
-                          <button
-                            key={spirit}
-                            onClick={() => toggleRecipeSpirit(spirit)}
-                            className={`shrink-0 px-3.5 py-1.5 rounded-full text-[9px] font-black uppercase tracking-widest transition-all ${activeRecipeSpirits.includes(spirit) ? 'bg-amber-500 text-zinc-950' : 'bg-zinc-800/50 text-zinc-600 border border-zinc-800'}`}
-                          >
-                            {spirit}
-                          </button>
-                        ))}
+              <div className="p-4 space-y-4 max-w-4xl mx-auto w-full">
+                <h2 className="text-xl font-black text-white italic px-1">Cheat Sheet</h2>
+                <div className="grid grid-cols-1 gap-3">
+                  {cocktails.map(c => (
+                    <div key={c.id} onClick={() => setSelectedCocktail(c)} className="bg-zinc-900 p-4 rounded-2xl border border-zinc-800 flex justify-between items-center active:bg-zinc-800 transition-colors">
+                      <div className="flex items-center gap-4">
+                        <div className="w-12 h-12 bg-zinc-800 rounded-xl overflow-hidden">
+                          <img src={c.imageUrl} className="w-full h-full object-cover" />
+                        </div>
+                        <div>
+                          <h3 className="font-bold text-white max-sm:text-sm">{c.name}</h3>
+                          <p className="text-zinc-500 text-[10px] uppercase font-black tracking-widest leading-tight">
+                            {c.ingredients.filter(i => categorizeIngredient(i) === 'Spirit').join(', ') || 'House'}
+                          </p>
+                        </div>
                       </div>
-                      <button
-                        onClick={() => setBartenderViewMode(bartenderViewMode === 'grid' ? 'list' : 'grid')}
-                        className="h-8 w-8 flex shrink-0 items-center justify-center bg-zinc-900 rounded-lg border border-zinc-800 text-zinc-400 active:scale-95 transition-all"
-                      >
-                        {bartenderViewMode === 'grid' ? <ListIcon size={14} /> : <LayoutGrid size={14} />}
-                      </button>
+                      <ChevronRight size={16} className="text-zinc-600" />
                     </div>
-
-                    {/* Taste Profiles Filter for Bartender */}
-                    {allTasteProfiles.length > 0 && (
-                      <div className="flex overflow-x-auto gap-1.5 pb-2 items-center pb-1">
-                        <div className="flex items-center justify-center w-6 shrink-0 text-zinc-600">
-                          <Tag size={12} />
-                        </div>
-                        {allTasteProfiles.map(profile => (
-                          <button
-                            key={profile}
-                            onClick={() => toggleTasteProfile(profile)}
-                            className={`shrink-0 px-3 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all border ${activeTasteProfiles.includes(profile) ? 'bg-zinc-100 text-zinc-950 border-zinc-100' : 'bg-zinc-900 text-zinc-500 border-zinc-800'}`}
-                          >
-                            {profile}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-                <div className={`p-4 ${bartenderViewMode === 'grid' ? 'grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-3' : 'flex flex-col gap-2'}`}>
-                  {filteredRecipes.length === 0 ? (
-                    <div className="col-span-full py-12 text-center text-zinc-600 text-xs font-black uppercase tracking-widest">
-                      No recipes found
-                    </div>
-                  ) : filteredRecipes.map(c => {
-                    const hasMissing = c.ingredients.some(ing => availability[ing]);
-
-                    if (bartenderViewMode === 'grid') {
-                      return (
-                        <div
-                          key={c.id}
-                          onClick={() => setSelectedCocktail(c)}
-                          className={`group relative bg-zinc-900 rounded-2xl overflow-hidden shadow-lg active:scale-[0.96] transition-all flex flex-col ${hasMissing ? 'ring-1 ring-red-500/20' : ''}`}
-                        >
-                          <div className="aspect-square bg-zinc-800 relative overflow-hidden flex items-center justify-center">
-                            <img
-                              src={c.imageUrl}
-                              alt={c.name}
-                              className="w-full h-full object-cover object-bottom transition-transform duration-500 group-active:scale-110"
-                              onError={(e) => {
-                                (e.target as HTMLImageElement).style.display = 'none';
-                                (e.target as HTMLImageElement).parentElement?.querySelector('.fallback-icon')?.classList.remove('hidden');
-                              }}
-                            />
-                            <div className="fallback-icon hidden text-zinc-700">
-                              <ImageIcon size={24} />
-                            </div>
-                            <div className="absolute inset-0 bg-gradient-to-t from-zinc-950/70 via-transparent to-transparent"></div>
-                            {hasMissing && (
-                              <div className="absolute top-2 right-2">
-                                <Badge variant="error">OUT</Badge>
-                              </div>
-                            )}
-                          </div>
-                          <div className="p-3 space-y-1 flex-1 flex flex-col justify-center">
-                            <h3 className="text-xs font-black text-white leading-tight line-clamp-2">{c.name}</h3>
-                            <p className="text-zinc-500 text-[8px] font-black uppercase truncate tracking-tighter">
-                              {c.ingredients.filter(i => categorizeIngredient(i) === 'Spirit').join(', ') || 'House Mix'}
-                            </p>
-                            {/* Taste Profiles - Below Spirit */}
-                            {c.tasteProfiles && c.tasteProfiles.length > 0 && (
-                              <div className="flex flex-wrap gap-1 mt-0.5">
-                                {c.tasteProfiles.slice(0, 3).map(p => (
-                                  <span key={p} className="text-[8px] font-bold text-zinc-400 bg-zinc-800/80 px-1.5 py-0.5 rounded-md tracking-wider">
-                                    {p}
-                                  </span>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    } else {
-                      return (
-                        <div
-                          key={c.id}
-                          onClick={() => setSelectedCocktail(c)}
-                          className={`group bg-zinc-900 p-2.5 rounded-2xl flex items-center gap-4 border transition-all active:scale-[0.98] ${hasMissing ? 'border-red-500/20' : 'border-zinc-800 hover:border-zinc-700'}`}
-                        >
-                          <div className="w-14 h-14 rounded-xl overflow-hidden bg-zinc-800 relative flex items-center justify-center shrink-0 shadow-lg">
-                            <img
-                              src={c.imageUrl}
-                              className="w-full h-full object-cover transition-transform group-hover:scale-110 duration-500"
-                              onError={(e) => {
-                                (e.target as HTMLImageElement).style.display = 'none';
-                                (e.target as HTMLImageElement).parentElement?.querySelector('.fallback-icon')?.classList.remove('hidden');
-                              }}
-                            />
-                            <div className="fallback-icon hidden text-zinc-700"><ImageIcon size={18} /></div>
-                            {hasMissing && <div className="absolute inset-0 bg-black/60 flex items-center justify-center backdrop-blur-[1px]"><X size={14} className="text-red-500" /></div>}
-                          </div>
-                          <div className="flex-1 min-w-0 py-1">
-                            <h3 className="font-bold text-white text-sm truncate">{c.name}</h3>
-                            <div className="flex flex-col gap-0.5 mt-0.5">
-                              <p className="text-zinc-500 text-[9px] font-black uppercase truncate tracking-widest">
-                                {c.ingredients.filter(i => categorizeIngredient(i) === 'Spirit').join(', ') || 'House Selection'}
-                              </p>
-                              {c.tasteProfiles && c.tasteProfiles.length > 0 && (
-                                <p className="text-zinc-400 text-[9px] font-bold uppercase tracking-wider">{c.tasteProfiles.join(', ')}</p>
-                              )}
-                            </div>
-                          </div>
-                          <ChevronRight size={16} className="text-zinc-700 mr-2" />
-                        </div>
-                      );
-                    }
-                  })}
+                  ))}
                 </div>
               </div>
             )}
@@ -1079,7 +1069,7 @@ const App: React.FC = () => {
 
   if (view === 'guest' && !session) {
     return (
-      <div className="min-h-screen bg-zinc-950 p-8 flex flex-col items-center justify-center">
+      <div className="min-h-screen bg-zinc-950 p-8 flex flex-col items-center justify-center relative">
         <div className="w-full max-w-md flex flex-col">
           <button onClick={() => setView('landing')} className="absolute top-8 left-8 p-3 text-zinc-500 bg-zinc-900 rounded-full">
             <X size={24} />
@@ -1142,7 +1132,7 @@ const App: React.FC = () => {
 
   if (view === 'bartender' && !session) {
     return (
-      <div className="min-h-screen bg-zinc-950 p-8 flex flex-col items-center justify-center">
+      <div className="min-h-screen bg-zinc-950 p-8 flex flex-col items-center justify-center relative">
         <div className="w-full max-w-md">
           <button onClick={() => setView('landing')} className="absolute top-8 left-8 p-3 text-zinc-500 bg-zinc-900 rounded-full">
             <X size={24} />
