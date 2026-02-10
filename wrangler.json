@@ -1,0 +1,11 @@
+{
+  "name": "casa-michele",
+  "compatibility_date": "2024-02-10",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS"
+  },
+  "observability": {
+    "enabled": true
+  }
+}
