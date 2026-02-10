@@ -35,7 +35,7 @@ import { supabase } from './services/supabase';
 import { fetchCocktailsFromSheet } from './services/sheet';
 import { Button, BottomSheet, Toast, Badge } from './components/UI';
 
-const VERSION = "v1.1.1 (Supabase)";
+const VERSION = "v1.1.2 (Supabase)";
 
 const INGREDIENT_CATEGORIES = [
   'Spirit',
