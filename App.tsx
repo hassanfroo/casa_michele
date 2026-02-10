@@ -770,6 +770,9 @@ const App: React.FC = () => {
           </BottomSheet>
         </div>
         <Toast isVisible={!!toastMessage} message={toastMessage} onHide={() => setToastMessage('')} />
+        <div className="fixed bottom-24 right-4 text-zinc-700 text-[10px] font-mono opacity-50 pointer-events-none z-50">
+          {VERSION}
+        </div>
       </div>
     );
   }
@@ -1063,6 +1066,9 @@ const App: React.FC = () => {
             </div>
           </nav>
         </div>
+        <div className="fixed bottom-24 right-4 text-zinc-700 text-[10px] font-mono opacity-50 pointer-events-none z-50">
+          {VERSION}
+        </div>
       </div>
     );
   }
@@ -1126,6 +1132,9 @@ const App: React.FC = () => {
             </form>
           </div>
         </div>
+        <div className="fixed bottom-4 right-4 text-zinc-700 text-[10px] font-mono opacity-50 pointer-events-none z-50">
+          {VERSION}
+        </div>
       </div>
     );
   }
@@ -1166,6 +1175,9 @@ const App: React.FC = () => {
           </div>
         </div>
         <Toast isVisible={!!toastMessage} message={toastMessage} onHide={() => setToastMessage('')} />
+        <div className="fixed bottom-4 right-4 text-zinc-700 text-[10px] font-mono opacity-50 pointer-events-none z-50">
+          {VERSION}
+        </div>
       </div>
     );
   }
