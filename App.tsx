@@ -967,7 +967,7 @@ const App: React.FC = () => {
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      const text = `Hey ${o.guestName}! Your ${o.cocktailName} is ready at the bar! 🍸`;
+                                      const text = `Hey ${o.guestName}! Your ${o.cocktailName} is ready at the bar! Cheers!`;
                                       window.open(`https://wa.me/${o.guestPhone}?text=${encodeURIComponent(text)}`, '_blank');
                                     }}
                                     className="w-14 h-14 bg-green-500 text-white rounded-2xl flex items-center justify-center border border-green-600 active:scale-90 transition-all shadow-lg shadow-green-500/20"
